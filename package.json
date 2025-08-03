@@ -20,6 +20,7 @@
     "@raycast/api": "^1.95.0",
     "@raycast/utils": "^1.17.0",
     "nanostores": "^1.0.1",
+    "nanostores-computed-dynamic": "^0.2.0",
     "uuidv7": "^1.0.2"
   },
   "devDependencies": {

@@ -2,10 +2,11 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { useStore } from "@nanostores/react";
 import { Action, ActionPanel, getPreferenceValues, Icon, List } from "@raycast/api";
 import { atom } from "nanostores";
+import { computedDynamic } from "nanostores-computed-dynamic";
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { useEffect, useState } from "react";
+import { ReactElement, useState } from "react";
 import { uuidv7 } from "uuidv7";
 
 function transcribe(buffer: Buffer) {
@@ -27,31 +28,91 @@ function transcribe(buffer: Buffer) {
   ]);
 }
 
+interface ControllerState {
+  recordingItemKey: string;
+  currentRecording: Recording | null;
+  stoppedRecordings: Recording[];
+}
+
 class RecordingController {
-  latestItemId: string | undefined;
-  $selectedItem = atom<string | undefined>("record");
-  $currentRecording = atom<Recording | null>(null);
-  $stoppedRecordings = atom<Recording[]>([]);
+  $state = atom<ControllerState>({
+    recordingItemKey: uuidv7(),
+    currentRecording: null,
+    stoppedRecordings: [],
+  });
   startRecording() {
     console.log("Recording started");
+    const currentState = this.$state.get();
+    const currentKey = currentState.recordingItemKey;
     const recording = new Recording({
+      key: currentKey,
       onStopped: () => {
-        if (this.$currentRecording.get() === recording) {
-          this.latestItemId = recording.id;
-          this.$currentRecording.set(null);
-          this.$stoppedRecordings.set([recording, ...this.$stoppedRecordings.get()]);
+        const state = this.$state.get();
+        if (state.currentRecording === recording) {
+          this.$state.set({
+            recordingItemKey: uuidv7(),
+            currentRecording: null,
+            stoppedRecordings: [recording, ...state.stoppedRecordings],
+          });
         }
       },
     });
-    this.$currentRecording.set(recording);
+    this.$state.set({
+      ...currentState,
+      currentRecording: recording,
+    });
   }
   deleteRecording(recording: Recording) {
-    const updated = this.$stoppedRecordings.get().filter((r) => r.id !== recording.id);
-    this.$stoppedRecordings.set(updated);
-    if (this.$selectedItem.get() === recording.id) {
-      this.$selectedItem.set("record");
-    }
+    const state = this.$state.get();
+    const updated = state.stoppedRecordings.filter((r) => r.id !== recording.id);
+    this.$state.set({
+      ...state,
+      stoppedRecordings: updated,
+    });
   }
+  $list = computedDynamic((use): ReactElement[] => {
+    const state = use(this.$state);
+    const { recordingItemKey, currentRecording, stoppedRecordings } = state;
+    const isRecording = !!currentRecording;
+
+    const listItems: ReactElement[] = [];
+
+    // Add recording item
+    listItems.push(
+      <List.Item
+        key={recordingItemKey}
+        title={isRecording ? "Now recording…" : "Start recording"}
+        icon={isRecording ? Icon.Stop : Icon.CircleFilled}
+        actions={
+          <ActionPanel>
+            <Action
+              title={isRecording ? "Stop Recording" : "Start Recording"}
+              icon={isRecording ? Icon.Stop : Icon.CircleFilled}
+              onAction={isRecording ? () => currentRecording.stop() : () => this.startRecording()}
+            />
+          </ActionPanel>
+        }
+        detail={isRecording ? <CurrentRecordingDetail currentRecording={currentRecording} /> : null}
+      />,
+    );
+
+    // Add stopped recordings
+    for (const recording of stoppedRecordings) {
+      const transcription = use(recording.$transcription);
+      listItems.push(
+        <List.Item
+          key={recording.key}
+          title={formatTime(recording.createdAt)}
+          subtitle={transcription?.transcription || ""}
+          icon={Icon.Microphone}
+          detail={<StoppedRecordingDetail recording={recording} />}
+          actions={<StoppedRecordingActions recording={recording} onDelete={() => this.deleteRecording(recording)} />}
+        />,
+      );
+    }
+
+    return listItems;
+  });
 }
 
 interface TranscriptionState {
@@ -62,13 +123,15 @@ interface TranscriptionState {
 
 class Recording {
   id = uuidv7();
+  key: string;
   createdAt = Date.now();
   $duration = atom(0);
   $transcription = atom<TranscriptionState | null>(null);
   $status = atom<"recording" | "stopping" | "stopped">("recording");
   recorder: AudioRecorder;
   private abortController: AbortController;
-  constructor(private options: { onStopped: () => void }) {
+  constructor(private options: { key: string; onStopped: () => void }) {
+    this.key = options.key;
     this.abortController = new AbortController();
     this.recorder = new AudioRecorder(this.id, this.abortController.signal);
     this.recorder.finishPromise.then(() => {
@@ -176,51 +239,8 @@ class AudioRecorder {
 
 export default function Command() {
   const [controller] = useState(() => new RecordingController());
-  const selectedItem = useStore(controller.$selectedItem);
-  const currentRecording = useStore(controller.$currentRecording);
-  const stoppedRecordings = useStore(controller.$stoppedRecordings);
-  const isRecording = !!currentRecording;
-  useEffect(() => {
-    const latestItemId = controller.latestItemId;
-    if (latestItemId && stoppedRecordings.some((recording) => recording.id === latestItemId)) {
-      controller.latestItemId = undefined;
-      setTimeout(() => {
-        controller.$selectedItem.set(latestItemId);
-      }, 100);
-    }
-  }, [stoppedRecordings]);
-  return (
-    <List
-      isShowingDetail
-      selectedItemId={selectedItem || "record"}
-      onSelectionChange={(id) => {
-        controller.$selectedItem.set(id || "record");
-      }}
-    >
-      <List.Item
-        id={"record"}
-        title={isRecording ? "Now recording…" : "Start recording"}
-        icon={isRecording ? Icon.Stop : Icon.CircleFilled}
-        actions={
-          <ActionPanel>
-            <Action
-              title={isRecording ? "Stop Recording" : "Start Recording"}
-              icon={isRecording ? Icon.Stop : Icon.CircleFilled}
-              onAction={isRecording ? () => currentRecording.stop() : () => controller.startRecording()}
-            />
-          </ActionPanel>
-        }
-        detail={isRecording ? <CurrentRecordingDetail currentRecording={currentRecording} /> : null}
-      />
-      {stoppedRecordings.map((recording) => (
-        <StoppedRecordingItem
-          key={recording.id}
-          recording={recording}
-          onDelete={() => controller.deleteRecording(recording)}
-        />
-      ))}
-    </List>
-  );
+  const listItems = useStore(controller.$list);
+  return <List isShowingDetail>{listItems}</List>;
 }
 
 const CurrentRecordingDetail: React.FC<{ currentRecording: Recording }> = ({ currentRecording }) => {
@@ -240,7 +260,7 @@ const CurrentRecordingDetail: React.FC<{ currentRecording: Recording }> = ({ cur
   );
 };
 
-const StoppedRecordingItem: React.FC<{ recording: Recording; onDelete: () => void }> = ({ recording, onDelete }) => {
+const StoppedRecordingDetail: React.FC<{ recording: Recording }> = ({ recording }) => {
   const transcription = useStore(recording.$transcription);
   const getTranscriptionMarkdown = (transcription: TranscriptionState) => {
     let text = transcription.transcription;
@@ -253,55 +273,52 @@ const StoppedRecordingItem: React.FC<{ recording: Recording; onDelete: () => voi
     return text;
   };
 
-  const textToCopy = String(transcription?.transcription || "No transcription").trim();
   return (
-    <List.Item
-      id={recording.id}
-      title={formatTime(recording.createdAt)}
-      subtitle={transcription?.transcription || ""}
-      icon={Icon.Microphone}
-      detail={
-        <List.Item.Detail
-          isLoading={!transcription?.finished}
-          markdown={transcription ? getTranscriptionMarkdown(transcription) : `No transcription`}
-        />
-      }
-      actions={
-        <ActionPanel>
-          <Action.Paste title="Type" content={textToCopy} />
-          <Action.Paste
-            title="Type (Decapitalized)"
-            content={textToCopy.charAt(0).toLowerCase() + textToCopy.slice(1)}
-            shortcut={{ modifiers: ["shift"], key: "return" }}
-          />
-          <Action.CopyToClipboard title="Copy" content={textToCopy} shortcut={{ modifiers: ["opt"], key: "return" }} />
-          <Action.CopyToClipboard
-            title="Copy (Decapitalized)"
-            content={textToCopy.charAt(0).toLowerCase() + textToCopy.slice(1)}
-            shortcut={{ modifiers: ["opt", "shift"], key: "return" }}
-          />
-          <Action
-            title="Retry"
-            icon={Icon.Repeat}
-            onAction={() => {
-              recording.transcribe();
-            }}
-            shortcut={{ modifiers: ["cmd"], key: "r" }}
-          />
-          <Action
-            title="Delete"
-            icon={Icon.Trash}
-            onAction={onDelete}
-            shortcut={{ modifiers: ["cmd"], key: "backspace" }}
-          />
-          <Action.ShowInFinder
-            title="Show in Finder"
-            path={recording.mp3Path}
-            shortcut={{ modifiers: ["cmd"], key: "return" }}
-          />
-        </ActionPanel>
-      }
+    <List.Item.Detail
+      isLoading={!transcription?.finished}
+      markdown={transcription ? getTranscriptionMarkdown(transcription) : `No transcription`}
     />
+  );
+};
+
+const StoppedRecordingActions: React.FC<{ recording: Recording; onDelete: () => void }> = ({ recording, onDelete }) => {
+  const transcription = useStore(recording.$transcription);
+  const textToCopy = String(transcription?.transcription || "No transcription").trim();
+
+  return (
+    <ActionPanel>
+      <Action.Paste title="Type" content={textToCopy} />
+      <Action.Paste
+        title="Type (Decapitalized)"
+        content={textToCopy.charAt(0).toLowerCase() + textToCopy.slice(1)}
+        shortcut={{ modifiers: ["shift"], key: "return" }}
+      />
+      <Action.CopyToClipboard title="Copy" content={textToCopy} shortcut={{ modifiers: ["cmd"], key: "return" }} />
+      <Action.CopyToClipboard
+        title="Copy (Decapitalized)"
+        content={textToCopy.charAt(0).toLowerCase() + textToCopy.slice(1)}
+        shortcut={{ modifiers: ["cmd", "shift"], key: "return" }}
+      />
+      <Action
+        title="Retry"
+        icon={Icon.Repeat}
+        onAction={() => {
+          recording.transcribe();
+        }}
+        shortcut={{ modifiers: ["cmd"], key: "r" }}
+      />
+      <Action
+        title="Delete"
+        icon={Icon.Trash}
+        onAction={onDelete}
+        shortcut={{ modifiers: ["cmd"], key: "backspace" }}
+      />
+      <Action.ShowInFinder
+        title="Show in Finder"
+        path={recording.mp3Path}
+        shortcut={{ modifiers: ["cmd"], key: "return" }}
+      />
+    </ActionPanel>
   );
 };
 
