@@ -220,10 +220,9 @@ class AudioRecorder {
     private id: string,
     abortSignal: AbortSignal,
   ) {
-    const child = spawn(
-      `/opt/homebrew/bin/sox -c 1 -t coreaudio "MacBook Pro Microphone" -t mp3 -C 128 --buffer 256 -`,
-      { shell: true },
-    );
+    const child = spawn(`/opt/homebrew/bin/sox -c 1 -t coreaudio default -t mp3 -C 128 --buffer 256 -`, {
+      shell: true,
+    });
     child.stderr.setEncoding("utf-8");
     child.stderr.on("data", (c) => {
       const levelMatch = c.match(/\[[-= |]+\]/);
