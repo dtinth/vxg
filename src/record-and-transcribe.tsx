@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 import { useStore } from "@nanostores/react";
 import { Action, ActionPanel, getPreferenceValues, Icon, List } from "@raycast/api";
 import { atom } from "nanostores";
@@ -10,22 +10,31 @@ import { ReactElement, useState } from "react";
 import { uuidv7 } from "uuidv7";
 
 function transcribe(buffer: Buffer) {
-  const { gemini_api_key } = getPreferenceValues<{ gemini_api_key: string }>();
-  const genAI = new GoogleGenerativeAI(gemini_api_key);
-  const model = genAI.getGenerativeModel({
+  const { gemini_api_key } = getPreferenceValues<{ gemini_api_key: string; default_action: string }>();
+  const ai = new GoogleGenAI({ apiKey: gemini_api_key });
+  return ai.models.generateContentStream({
     model: "gemini-2.0-flash",
-  });
-  return model.generateContentStream([
-    {
-      inlineData: {
-        mimeType: "audio/mp3",
-        data: buffer.toString("base64"),
+    contents: [
+      {
+        parts: [
+          {
+            inlineData: {
+              mimeType: "audio/mp3",
+              data: buffer.toString("base64"),
+            },
+          },
+          {
+            text: 'Please transcribe any speech in this audio. Ignore non-speech elements. For Thai text, only add spaces between sentences, phrases, or between Thai and non-Thai words. Do not add spaces between Thai words in the same sentence. If there is no speech, respond with "No speech detected".',
+          },
+        ],
+      },
+    ],
+    config: {
+      thinkingConfig: {
+        includeThoughts: true,
       },
     },
-    {
-      text: 'Please transcribe any speech in this audio. If there is no clear speech, respond with "No speech detected".',
-    },
-  ]);
+  });
 }
 
 interface ControllerState {
@@ -168,13 +177,20 @@ class Recording {
     let transcription = "";
     try {
       const stream = await transcribe(buffer);
-      for await (const chunk of stream.stream) {
-        transcription += chunk.text();
-        this.$transcription.set({
-          finished: false,
-          transcription,
-          error: null,
-        });
+      for await (const chunk of stream) {
+        for (const part of chunk.candidates?.[0]?.content?.parts || []) {
+          if (part.thought) {
+            console.log("Thought:", part.text);
+          }
+        }
+        if (chunk.text) {
+          transcription += chunk.text;
+          this.$transcription.set({
+            finished: false,
+            transcription,
+            error: null,
+          });
+        }
       }
       this.$transcription.set({
         finished: true,
@@ -284,19 +300,31 @@ const StoppedRecordingDetail: React.FC<{ recording: Recording }> = ({ recording 
 const StoppedRecordingActions: React.FC<{ recording: Recording; onDelete: () => void }> = ({ recording, onDelete }) => {
   const transcription = useStore(recording.$transcription);
   const textToCopy = String(transcription?.transcription || "No transcription").trim();
+  const { default_action } = getPreferenceValues<{ gemini_api_key: string; default_action: string }>();
+
+  const isTypeFirst = default_action !== "copy";
+  const decapitalizedText = textToCopy.charAt(0).toLowerCase() + textToCopy.slice(1);
 
   return (
     <ActionPanel>
-      <Action.Paste title="Type" content={textToCopy} />
+      <Action.Paste
+        title="Type"
+        content={textToCopy}
+        shortcut={isTypeFirst ? undefined : { modifiers: ["cmd"], key: "return" }}
+      />
       <Action.Paste
         title="Type (Decapitalized)"
-        content={textToCopy.charAt(0).toLowerCase() + textToCopy.slice(1)}
+        content={decapitalizedText}
         shortcut={{ modifiers: ["shift"], key: "return" }}
       />
-      <Action.CopyToClipboard title="Copy" content={textToCopy} shortcut={{ modifiers: ["cmd"], key: "return" }} />
+      <Action.CopyToClipboard
+        title="Copy"
+        content={textToCopy}
+        shortcut={isTypeFirst ? { modifiers: ["cmd"], key: "return" } : undefined}
+      />
       <Action.CopyToClipboard
         title="Copy (Decapitalized)"
-        content={textToCopy.charAt(0).toLowerCase() + textToCopy.slice(1)}
+        content={decapitalizedText}
         shortcut={{ modifiers: ["cmd", "shift"], key: "return" }}
       />
       <Action
@@ -316,7 +344,7 @@ const StoppedRecordingActions: React.FC<{ recording: Recording; onDelete: () => 
       <Action.ShowInFinder
         title="Show in Finder"
         path={recording.mp3Path}
-        shortcut={{ modifiers: ["cmd"], key: "return" }}
+        shortcut={{ modifiers: ["cmd"], key: "o" }}
       />
     </ActionPanel>
   );
