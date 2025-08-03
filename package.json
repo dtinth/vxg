@@ -2,7 +2,6 @@
   "$schema": "https://www.raycast.com/schemas/extension.json",
   "name": "vxg",
   "title": "Vxg",
-  "owner": "dt.in.th",
   "description": "Record voice with AI transcription using Google Gemini",
   "icon": "extension-icon.png",
   "author": "dtinth",
