@@ -4,7 +4,7 @@ import { Action, ActionPanel, getPreferenceValues, Icon, List } from "@raycast/a
 import { atom } from "nanostores";
 import { computedDynamic } from "nanostores-computed-dynamic";
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { ReactElement, useState } from "react";
 import { uuidv7 } from "uuidv7";
@@ -13,10 +13,19 @@ function transcribe(buffer: Buffer) {
   const { gemini_api_key } = getPreferenceValues<{ gemini_api_key: string; default_action: string }>();
   const ai = new GoogleGenAI({ apiKey: gemini_api_key });
   return ai.models.generateContentStream({
-    model: "gemini-2.0-flash",
+    model: "gemini-2.5-flash",
     contents: [
       {
         parts: [
+          {
+            text:
+              "Please transcribe any speech in this audio. " +
+              "Ignore non-speech elements. " +
+              "For Thai text, only add spaces between sentences, phrases, or between Thai and non-Thai words. Do not add spaces between Thai words in the same sentence. " +
+              "Before responding, in your thinking process, draft the first 20 words, and refine the transcript, such as spacing and word usage. " +
+              'If there is no speech, respond with "No speech detected". ' +
+              "Here comes the audio: <audio>",
+          },
           {
             inlineData: {
               mimeType: "audio/mp3",
@@ -24,7 +33,7 @@ function transcribe(buffer: Buffer) {
             },
           },
           {
-            text: 'Please transcribe any speech in this audio. Ignore non-speech elements. For Thai text, only add spaces between sentences, phrases, or between Thai and non-Thai words. Do not add spaces between Thai words in the same sentence. If there is no speech, respond with "No speech detected".',
+            text: "</audio>",
           },
         ],
       },
@@ -32,6 +41,7 @@ function transcribe(buffer: Buffer) {
     config: {
       thinkingConfig: {
         includeThoughts: true,
+        thinkingBudget: 512,
       },
     },
   });
@@ -128,6 +138,11 @@ interface TranscriptionState {
   finished: boolean;
   transcription: string;
   error: string | null;
+  latestThought?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  thoughtsTokens?: number;
+  audioLengthSeconds?: number;
 }
 
 class Recording {
@@ -169,41 +184,83 @@ class Recording {
       return;
     }
     const buffer = this.recorder.getBuffer();
+    const audioLengthSeconds = buffer.length / (128000 / 8); // Approximate for 128kbps MP3
     this.$transcription.set({
       finished: false,
       transcription: "",
       error: null,
+      latestThought: undefined,
+      inputTokens: undefined,
+      outputTokens: undefined,
+      thoughtsTokens: undefined,
+      audioLengthSeconds,
     });
     let transcription = "";
     try {
       const stream = await transcribe(buffer);
       for await (const chunk of stream) {
+        let latestThought: string | undefined;
         for (const part of chunk.candidates?.[0]?.content?.parts || []) {
           if (part.thought) {
             console.log("Thought:", part.text);
+            const thoughtMatch = part.text?.match(/\*\*(.+?)\*\*/);
+            if (thoughtMatch) {
+              latestThought = thoughtMatch[1];
+            }
           }
         }
         if (chunk.text) {
           transcription += chunk.text;
-          this.$transcription.set({
-            finished: false,
-            transcription,
-            error: null,
-          });
         }
+        const currentState = this.$transcription.get();
+        this.$transcription.set({
+          finished: false,
+          transcription,
+          error: null,
+          latestThought,
+          inputTokens: chunk.usageMetadata?.promptTokenCount || currentState?.inputTokens,
+          outputTokens: chunk.usageMetadata?.candidatesTokenCount || currentState?.outputTokens,
+          thoughtsTokens: chunk.usageMetadata?.thoughtsTokenCount || currentState?.thoughtsTokens,
+          audioLengthSeconds: currentState?.audioLengthSeconds,
+        });
       }
+      const finalState = this.$transcription.get();
       this.$transcription.set({
         finished: true,
         transcription,
         error: null,
+        latestThought: undefined,
+        inputTokens: finalState?.inputTokens,
+        outputTokens: finalState?.outputTokens,
+        thoughtsTokens: finalState?.thoughtsTokens,
+        audioLengthSeconds: finalState?.audioLengthSeconds,
       });
+
       // Write transcription to .txt file
       writeFileSync(this.txtPath, transcription, "utf8");
+
+      // Append metadata to log file
+      const logEntry = {
+        recordingId: this.id,
+        audioLengthSeconds: finalState?.audioLengthSeconds,
+        inputTokens: finalState?.inputTokens,
+        outputTokens: finalState?.outputTokens,
+        thoughtsTokens: finalState?.thoughtsTokens,
+        transcriptionLength: transcription.length,
+      };
+      const logPath = "/tmp/vxg/transcription-log.ndjson";
+      appendFileSync(logPath, JSON.stringify(logEntry) + "\n", "utf8");
     } catch (error: unknown) {
+      const finalState = this.$transcription.get();
       this.$transcription.set({
         finished: true,
         transcription,
         error: String(error),
+        latestThought: undefined,
+        inputTokens: finalState?.inputTokens,
+        outputTokens: finalState?.outputTokens,
+        thoughtsTokens: finalState?.thoughtsTokens,
+        audioLengthSeconds: finalState?.audioLengthSeconds,
       });
       console.error("Error during transcription:", error);
       return;
@@ -280,7 +337,11 @@ const StoppedRecordingDetail: React.FC<{ recording: Recording }> = ({ recording 
   const getTranscriptionMarkdown = (transcription: TranscriptionState) => {
     let text = transcription.transcription;
     if (!transcription.finished) {
-      text += "...";
+      if (transcription.latestThought && !text) {
+        text += `*${transcription.latestThought}...*`;
+      } else {
+        text += "...";
+      }
     }
     if (transcription.error) {
       text += `\n\nError: ${transcription.error}`;
@@ -292,6 +353,27 @@ const StoppedRecordingDetail: React.FC<{ recording: Recording }> = ({ recording 
     <List.Item.Detail
       isLoading={!transcription?.finished}
       markdown={transcription ? getTranscriptionMarkdown(transcription) : `No transcription`}
+      metadata={
+        transcription && (
+          <List.Item.Detail.Metadata>
+            {transcription.audioLengthSeconds && (
+              <List.Item.Detail.Metadata.Label
+                title="Audio Length"
+                text={`${transcription.audioLengthSeconds.toFixed(1)}s`}
+              />
+            )}
+            {transcription.inputTokens && (
+              <List.Item.Detail.Metadata.Label title="Input Tokens" text={transcription.inputTokens.toString()} />
+            )}
+            {transcription.thoughtsTokens && (
+              <List.Item.Detail.Metadata.Label title="Thoughts Tokens" text={transcription.thoughtsTokens.toString()} />
+            )}
+            {transcription.outputTokens && (
+              <List.Item.Detail.Metadata.Label title="Output Tokens" text={transcription.outputTokens.toString()} />
+            )}
+          </List.Item.Detail.Metadata>
+        )
+      }
     />
   );
 };
@@ -304,49 +386,70 @@ const StoppedRecordingActions: React.FC<{ recording: Recording; onDelete: () => 
   const isTypeFirst = default_action !== "copy";
   const decapitalizedText = textToCopy.charAt(0).toLowerCase() + textToCopy.slice(1);
 
-  return (
-    <ActionPanel>
-      <Action.Paste
-        title="Type"
-        content={textToCopy}
-        shortcut={isTypeFirst ? undefined : { modifiers: ["cmd"], key: "return" }}
-      />
-      <Action.Paste
-        title="Type (Decapitalized)"
-        content={decapitalizedText}
-        shortcut={{ modifiers: ["shift"], key: "return" }}
-      />
-      <Action.CopyToClipboard
-        title="Copy"
-        content={textToCopy}
-        shortcut={isTypeFirst ? { modifiers: ["cmd"], key: "return" } : undefined}
-      />
-      <Action.CopyToClipboard
-        title="Copy (Decapitalized)"
-        content={decapitalizedText}
-        shortcut={{ modifiers: ["cmd", "shift"], key: "return" }}
-      />
-      <Action
-        title="Retry"
-        icon={Icon.Repeat}
-        onAction={() => {
-          recording.transcribe();
-        }}
-        shortcut={{ modifiers: ["cmd"], key: "r" }}
-      />
-      <Action
-        title="Delete"
-        icon={Icon.Trash}
-        onAction={onDelete}
-        shortcut={{ modifiers: ["cmd"], key: "backspace" }}
-      />
-      <Action.ShowInFinder
-        title="Show in Finder"
-        path={recording.mp3Path}
-        shortcut={{ modifiers: ["cmd"], key: "o" }}
-      />
-    </ActionPanel>
+  const typeActions = [
+    <Action.Paste
+      key="type"
+      title="Type"
+      content={textToCopy}
+      shortcut={isTypeFirst ? undefined : { modifiers: ["cmd"], key: "return" }}
+    />,
+    <Action.Paste
+      key="type-decap"
+      title="Type (Decapitalized)"
+      content={decapitalizedText}
+      shortcut={{ modifiers: ["shift"], key: "return" }}
+    />,
+  ];
+
+  const copyActions = [
+    <Action.CopyToClipboard
+      key="copy"
+      title="Copy"
+      content={textToCopy}
+      shortcut={isTypeFirst ? { modifiers: ["cmd"], key: "return" } : undefined}
+    />,
+    <Action.CopyToClipboard
+      key="copy-decap"
+      title="Copy (Decapitalized)"
+      content={decapitalizedText}
+      shortcut={{ modifiers: ["cmd", "shift"], key: "return" }}
+    />,
+  ];
+
+  const actions: React.ReactNode[] = [];
+
+  if (isTypeFirst) {
+    actions.push(...typeActions, ...copyActions);
+  } else {
+    actions.push(...copyActions, ...typeActions);
+  }
+
+  actions.push(
+    <Action
+      key="retry"
+      title="Retry"
+      icon={Icon.Repeat}
+      onAction={() => {
+        recording.transcribe();
+      }}
+      shortcut={{ modifiers: ["cmd"], key: "r" }}
+    />,
+    <Action
+      key="delete"
+      title="Delete"
+      icon={Icon.Trash}
+      onAction={onDelete}
+      shortcut={{ modifiers: ["cmd"], key: "backspace" }}
+    />,
+    <Action.ShowInFinder
+      key="show-finder"
+      title="Show in Finder"
+      path={recording.mp3Path}
+      shortcut={{ modifiers: ["cmd"], key: "o" }}
+    />,
   );
+
+  return <ActionPanel>{actions}</ActionPanel>;
 };
 
 function formatTime(timestamp: number): string {

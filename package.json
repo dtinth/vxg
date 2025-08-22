@@ -15,18 +15,18 @@
       "preferences": [
         {
           "name": "default_action",
-          "title": "Default Action",
+          "title": "Primary Action",
           "description": "Choose which action happens when you press Enter",
           "type": "dropdown",
           "required": false,
           "default": "type",
           "data": [
             {
-              "title": "Type (like Snippets)",
+              "title": "Paste to Active App",
               "value": "type"
             },
             {
-              "title": "Copy (like Clipboard History)",
+              "title": "Copy to Clipboard",
               "value": "copy"
             }
           ]
