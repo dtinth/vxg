@@ -11,10 +11,10 @@ import { ReactElement, useEffect, useState } from "react";
 import { uuidv7 } from "uuidv7";
 
 function transcribe(buffer: Buffer) {
-  const { gemini_api_key } = getPreferenceValues<{ gemini_api_key: string; default_action: string }>();
+  const { gemini_api_key, gemini_model } = getPreferenceValues<{ gemini_api_key: string; default_action: string; gemini_model: string }>();
   const ai = new GoogleGenAI({ apiKey: gemini_api_key });
   return ai.models.generateContentStream({
-    model: "gemini-2.5-flash",
+    model: gemini_model || "gemini-2.5-flash",
     contents: [
       {
         parts: [
@@ -529,7 +529,7 @@ const StoppedRecordingDetail: React.FC<{ recording: Recording }> = ({ recording 
 const StoppedRecordingActions: React.FC<{ recording: Recording; onDelete: () => void }> = ({ recording, onDelete }) => {
   const transcription = useStore(recording.$transcription);
   const textToCopy = String(transcription?.transcription || "No transcription").trim();
-  const { default_action } = getPreferenceValues<{ gemini_api_key: string; default_action: string }>();
+  const { default_action } = getPreferenceValues<{ gemini_api_key: string; default_action: string; gemini_model: string }>();
 
   const isTypeFirst = default_action !== "copy";
   const decapitalizedText = textToCopy.charAt(0).toLowerCase() + textToCopy.slice(1);
