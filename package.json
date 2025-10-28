@@ -66,6 +66,36 @@
       "type": "password",
       "description": "Enter your Gemini API key. You can get it from https://aistudio.google.com/app/apikey.",
       "required": true
+    },
+    {
+      "name": "gemini_model",
+      "title": "Gemini Model",
+      "type": "dropdown",
+      "description": "Choose which Gemini model to use for transcription",
+      "required": false,
+      "default": "gemini-2.5-flash",
+      "data": [
+        {
+          "title": "Gemini 2.5 Flash",
+          "value": "gemini-2.5-flash"
+        },
+        {
+          "title": "Gemini 2.5 Flash Lite",
+          "value": "gemini-2.5-flash-lite"
+        },
+        {
+          "title": "Gemini 2.5 Pro",
+          "value": "gemini-2.5-pro"
+        },
+        {
+          "title": "Gemini 2.5 Flash Preview 09-2025",
+          "value": "gemini-2.5-flash-preview-09-2025"
+        },
+        {
+          "title": "Gemini 2.5 Flash Lite Preview 09-2025",
+          "value": "gemini-2.5-flash-lite-preview-09-2025"
+        }
+      ]
     }
   ],
   "packageManager": "pnpm@9.15.4+sha512.b2dc20e2fc72b3e18848459b37359a32064663e5627a51e4c74b2c29dd8e8e0491483c3abb40789cfd578bf362fb6ba8261b05f0387d76792ed6e23ea3b1b6a0"
