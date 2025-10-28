@@ -163,7 +163,10 @@ class RecordingController {
   async loadPastRecordings() {
     try {
       const logContent = await readFile(LOG_PATH, "utf8");
-      const lines = logContent.trim().split("\n").filter((line) => line.trim());
+      const lines = logContent
+        .trim()
+        .split("\n")
+        .filter((line) => line.trim());
 
       // Parse all log entries
       const logEntries: LogEntry[] = [];
@@ -176,8 +179,8 @@ class RecordingController {
         }
       }
 
-      // Filter entries within the last hour
-      const oneHourAgo = Date.now() - 60 * 60 * 1000;
+      // Filter entries within the last day
+      const oneHourAgo = Date.now() - 60 * 60 * 24 * 1000;
       const recentEntries = logEntries.filter((entry) => {
         try {
           const timestamp = entry.createdAt ?? extractTimestampFromUUIDv7(entry.recordingId);
