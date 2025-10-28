@@ -5,8 +5,9 @@ import { atom } from "nanostores";
 import { computedDynamic } from "nanostores-computed-dynamic";
 import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { ReactElement, useState } from "react";
+import { ReactElement, useEffect, useState } from "react";
 import { uuidv7 } from "uuidv7";
 
 function transcribe(buffer: Buffer) {
@@ -45,6 +46,33 @@ function transcribe(buffer: Buffer) {
       },
     },
   });
+}
+
+function extractTimestampFromUUIDv7(uuid: string): number {
+  // UUIDv7 format: first 48 bits are Unix timestamp in milliseconds
+  // UUID format: xxxxxxxx-xxxx-7xxx-xxxx-xxxxxxxxxxxx
+  // First 8 hex chars (32 bits) + next 4 hex chars (16 bits) = 48 bits timestamp
+  const hex = uuid.replace(/-/g, "");
+  const timestampHex = hex.substring(0, 12); // First 48 bits (12 hex chars)
+  const timestamp = parseInt(timestampHex, 16);
+  return timestamp;
+}
+
+const nullRecorder = {
+  $duration: atom("00:00:00.00"),
+  $levels: atom("[      |      ]"),
+};
+
+const LOG_PATH = "/tmp/vxg/transcription-log.ndjson";
+
+interface LogEntry {
+  recordingId: string;
+  createdAt: number;
+  audioLengthSeconds?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  thoughtsTokens?: number;
+  transcriptionLength: number;
 }
 
 interface ControllerState {
@@ -132,6 +160,77 @@ class RecordingController {
 
     return listItems;
   });
+  async loadPastRecordings() {
+    try {
+      const logContent = await readFile(LOG_PATH, "utf8");
+      const lines = logContent.trim().split("\n").filter((line) => line.trim());
+
+      // Parse all log entries
+      const logEntries: LogEntry[] = [];
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line) as LogEntry;
+          logEntries.push(entry);
+        } catch (error) {
+          console.warn("Failed to parse log entry:", line, error);
+        }
+      }
+
+      // Filter entries within the last hour
+      const oneHourAgo = Date.now() - 60 * 60 * 1000;
+      const recentEntries = logEntries.filter((entry) => {
+        try {
+          const timestamp = entry.createdAt ?? extractTimestampFromUUIDv7(entry.recordingId);
+          return timestamp >= oneHourAgo;
+        } catch (error) {
+          console.warn(`Failed to extract timestamp from entry:`, entry, error);
+          return false;
+        }
+      });
+
+      // Sort by timestamp (newest first) and take the latest 10
+      recentEntries.sort((a, b) => {
+        const timeA = a.createdAt ?? extractTimestampFromUUIDv7(a.recordingId);
+        const timeB = b.createdAt ?? extractTimestampFromUUIDv7(b.recordingId);
+        return timeB - timeA;
+      });
+      const latestEntries = recentEntries.slice(0, 10);
+
+      // Load recordings from log entries
+      const recordings: Recording[] = [];
+      for (const entry of latestEntries) {
+        try {
+          const mp3Path = `/tmp/vxg/${entry.recordingId}.mp3`;
+          const txtPath = `/tmp/vxg/${entry.recordingId}.txt`;
+
+          // Check if files exist by trying to read them
+          const transcriptionText = await readFile(txtPath, "utf8");
+
+          // Verify mp3 exists (we don't need to read it, just check)
+          await readFile(mp3Path);
+
+          // Create recording from log entry
+          const recording = Recording.fromLogEntry(entry, transcriptionText);
+          recordings.push(recording);
+        } catch (error) {
+          // Skip entries where files are missing
+          console.warn(`Skipping recording ${entry.recordingId}: files not found`, error);
+        }
+      }
+
+      // Update state with loaded recordings
+      const currentState = this.$state.get();
+      this.$state.set({
+        ...currentState,
+        stoppedRecordings: [...recordings, ...currentState.stoppedRecordings],
+      });
+
+      console.log(`Loaded ${recordings.length} past recordings`);
+    } catch (error) {
+      // Log file doesn't exist or other error - just continue
+      console.warn("Could not load past recordings:", error);
+    }
+  }
 }
 
 interface TranscriptionState {
@@ -146,25 +245,58 @@ interface TranscriptionState {
 }
 
 class Recording {
-  id = uuidv7();
+  id: string;
   key: string;
-  createdAt = Date.now();
+  createdAt: number;
   $duration = atom(0);
   $transcription = atom<TranscriptionState | null>(null);
   $status = atom<"recording" | "stopping" | "stopped">("recording");
-  recorder: AudioRecorder;
-  private abortController: AbortController;
-  constructor(private options: { key: string; onStopped: () => void }) {
-    this.key = options.key;
-    this.abortController = new AbortController();
-    this.recorder = new AudioRecorder(this.id, this.abortController.signal);
-    this.recorder.finishPromise.then(() => {
+  recorder?: AudioRecorder;
+  private abortController?: AbortController;
+  private options?: { key: string; onStopped: () => void };
+
+  constructor(config: { key: string; onStopped: () => void } | { id: string; key: string; createdAt: number }) {
+    if ("onStopped" in config) {
+      // New recording mode
+      this.id = uuidv7();
+      this.key = config.key;
+      this.createdAt = Date.now();
+      this.options = config;
+      this.abortController = new AbortController();
+      this.recorder = new AudioRecorder(this.id, this.abortController.signal);
+      this.recorder.finishPromise.then(() => {
+        this.$status.set("stopped");
+        this.options!.onStopped();
+        mkdirSync(dirname(this.mp3Path), { recursive: true });
+        writeFileSync(this.mp3Path, this.recorder!.getBuffer());
+        this.transcribe();
+      });
+    } else {
+      // Loaded from log mode
+      this.id = config.id;
+      this.key = config.key;
+      this.createdAt = config.createdAt;
       this.$status.set("stopped");
-      this.options.onStopped();
-      mkdirSync(dirname(this.mp3Path), { recursive: true });
-      writeFileSync(this.mp3Path, this.recorder.getBuffer());
-      this.transcribe();
+    }
+  }
+
+  static fromLogEntry(logEntry: LogEntry, transcriptionText: string): Recording {
+    const createdAt = logEntry.createdAt ?? extractTimestampFromUUIDv7(logEntry.recordingId);
+    const recording = new Recording({
+      id: logEntry.recordingId,
+      key: logEntry.recordingId,
+      createdAt,
     });
+    recording.$transcription.set({
+      finished: true,
+      transcription: transcriptionText,
+      error: null,
+      audioLengthSeconds: logEntry.audioLengthSeconds,
+      inputTokens: logEntry.inputTokens,
+      outputTokens: logEntry.outputTokens,
+      thoughtsTokens: logEntry.thoughtsTokens,
+    });
+    return recording;
   }
   get mp3Path() {
     return `/tmp/vxg/${this.id}.mp3`;
@@ -177,10 +309,14 @@ class Recording {
       return;
     }
     this.$status.set("stopping");
-    this.abortController.abort();
+    this.abortController?.abort();
   }
   async transcribe() {
     if (this.$transcription.get() && !this.$transcription.get()!.finished) {
+      return;
+    }
+    if (!this.recorder) {
+      console.error("Cannot transcribe: no recorder available");
       return;
     }
     const buffer = this.recorder.getBuffer();
@@ -242,14 +378,14 @@ class Recording {
       // Append metadata to log file
       const logEntry = {
         recordingId: this.id,
+        createdAt: this.createdAt,
         audioLengthSeconds: finalState?.audioLengthSeconds,
         inputTokens: finalState?.inputTokens,
         outputTokens: finalState?.outputTokens,
         thoughtsTokens: finalState?.thoughtsTokens,
         transcriptionLength: transcription.length,
       };
-      const logPath = "/tmp/vxg/transcription-log.ndjson";
-      appendFileSync(logPath, JSON.stringify(logEntry) + "\n", "utf8");
+      appendFileSync(LOG_PATH, JSON.stringify(logEntry) + "\n", "utf8");
     } catch (error: unknown) {
       const finalState = this.$transcription.get();
       this.$transcription.set({
@@ -312,13 +448,22 @@ class AudioRecorder {
 export default function Command() {
   const [controller] = useState(() => new RecordingController());
   const listItems = useStore(controller.$list);
+  useEffect(() => {
+    const load = setTimeout(() => {
+      controller.loadPastRecordings();
+    }, 100);
+    return () => {
+      clearTimeout(load);
+    };
+  }, [controller]);
   return <List isShowingDetail>{listItems}</List>;
 }
 
 const CurrentRecordingDetail: React.FC<{ currentRecording: Recording }> = ({ currentRecording }) => {
   const status = useStore(currentRecording.$status);
-  const duration = useStore(currentRecording.recorder.$duration);
-  const levels = useStore(currentRecording.recorder.$levels);
+  const recorder = currentRecording.recorder ?? nullRecorder;
+  const duration = useStore(recorder.$duration);
+  const levels = useStore(recorder.$levels);
   return (
     <List.Item.Detail
       markdown={`# ${status}`}
@@ -387,41 +532,33 @@ const StoppedRecordingActions: React.FC<{ recording: Recording; onDelete: () => 
   const decapitalizedText = textToCopy.charAt(0).toLowerCase() + textToCopy.slice(1);
 
   const typeActions = [
-    <Action.Paste
-      key="type"
-      title="Type"
-      content={textToCopy}
-      shortcut={isTypeFirst ? undefined : { modifiers: ["cmd"], key: "return" }}
-    />,
+    <Action.Paste key="type" title="Type" content={textToCopy} shortcut={undefined} />,
     <Action.Paste
       key="type-decap"
       title="Type (Decapitalized)"
       content={decapitalizedText}
-      shortcut={{ modifiers: ["shift"], key: "return" }}
+      shortcut={isTypeFirst ? { modifiers: ["shift"], key: "return" } : { modifiers: ["cmd", "shift"], key: "return" }}
     />,
   ];
 
   const copyActions = [
-    <Action.CopyToClipboard
-      key="copy"
-      title="Copy"
-      content={textToCopy}
-      shortcut={isTypeFirst ? { modifiers: ["cmd"], key: "return" } : undefined}
-    />,
+    <Action.CopyToClipboard key="copy" title="Copy" content={textToCopy} shortcut={{ modifiers: ["cmd"], key: "c" }} />,
     <Action.CopyToClipboard
       key="copy-decap"
       title="Copy (Decapitalized)"
       content={decapitalizedText}
-      shortcut={{ modifiers: ["cmd", "shift"], key: "return" }}
+      shortcut={isTypeFirst ? { modifiers: ["cmd", "shift"], key: "return" } : { modifiers: ["shift"], key: "return" }}
     />,
   ];
 
   const actions: React.ReactNode[] = [];
 
+  // Note: The first action becomes the "primary action" and the 2nd action becomes the "secondary action".
+  // The first action gets ↵ and the 2nd action gets ⌘↵ by default.
   if (isTypeFirst) {
-    actions.push(...typeActions, ...copyActions);
+    actions.push(typeActions.shift(), copyActions.shift(), ...typeActions, ...copyActions);
   } else {
-    actions.push(...copyActions, ...typeActions);
+    actions.push(copyActions.shift(), typeActions.shift(), ...copyActions, ...typeActions);
   }
 
   actions.push(
