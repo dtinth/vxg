@@ -387,41 +387,33 @@ const StoppedRecordingActions: React.FC<{ recording: Recording; onDelete: () => 
   const decapitalizedText = textToCopy.charAt(0).toLowerCase() + textToCopy.slice(1);
 
   const typeActions = [
-    <Action.Paste
-      key="type"
-      title="Type"
-      content={textToCopy}
-      shortcut={isTypeFirst ? undefined : { modifiers: ["cmd"], key: "return" }}
-    />,
+    <Action.Paste key="type" title="Type" content={textToCopy} shortcut={undefined} />,
     <Action.Paste
       key="type-decap"
       title="Type (Decapitalized)"
       content={decapitalizedText}
-      shortcut={{ modifiers: ["shift"], key: "return" }}
+      shortcut={isTypeFirst ? { modifiers: ["shift"], key: "return" } : { modifiers: ["cmd", "shift"], key: "return" }}
     />,
   ];
 
   const copyActions = [
-    <Action.CopyToClipboard
-      key="copy"
-      title="Copy"
-      content={textToCopy}
-      shortcut={isTypeFirst ? { modifiers: ["cmd"], key: "return" } : undefined}
-    />,
+    <Action.CopyToClipboard key="copy" title="Copy" content={textToCopy} shortcut={{ modifiers: ["cmd"], key: "c" }} />,
     <Action.CopyToClipboard
       key="copy-decap"
       title="Copy (Decapitalized)"
       content={decapitalizedText}
-      shortcut={{ modifiers: ["cmd", "shift"], key: "return" }}
+      shortcut={isTypeFirst ? { modifiers: ["cmd", "shift"], key: "return" } : { modifiers: ["shift"], key: "return" }}
     />,
   ];
 
   const actions: React.ReactNode[] = [];
 
+  // Note: The first action becomes the "primary action" and the 2nd action becomes the "secondary action".
+  // The first action gets ↵ and the 2nd action gets ⌘↵ by default.
   if (isTypeFirst) {
-    actions.push(...typeActions, ...copyActions);
+    actions.push(typeActions.shift(), copyActions.shift(), ...typeActions, ...copyActions);
   } else {
-    actions.push(...copyActions, ...typeActions);
+    actions.push(copyActions.shift(), typeActions.shift(), ...copyActions, ...typeActions);
   }
 
   actions.push(
