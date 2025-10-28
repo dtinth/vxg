@@ -11,7 +11,11 @@ import { ReactElement, useEffect, useState } from "react";
 import { uuidv7 } from "uuidv7";
 
 function transcribe(buffer: Buffer) {
-  const { gemini_api_key, gemini_model } = getPreferenceValues<{ gemini_api_key: string; default_action: string; gemini_model: string }>();
+  const { gemini_api_key, gemini_model } = getPreferenceValues<{
+    gemini_api_key: string;
+    default_action: string;
+    gemini_model: string;
+  }>();
   const ai = new GoogleGenAI({ apiKey: gemini_api_key });
   return ai.models.generateContentStream({
     model: gemini_model || "gemini-2.5-flash",
@@ -24,7 +28,8 @@ function transcribe(buffer: Buffer) {
               "Ignore non-speech elements. " +
               "For Thai text, only add spaces between sentences, phrases, or between Thai and non-Thai words. Do not add spaces between Thai words in the same sentence. " +
               "Before responding, in your thinking process, draft the first 20 words, and refine the transcript, such as spacing and word usage. " +
-              'If there is no speech, respond with "No speech detected". ' +
+              "Present your final transcript inside <final_transcript></final_transcript> tags. " +
+              'If there is no speech, respond with "<final_transcript>No speech detected</final_transcript>". ' +
               "Here comes the audio: <audio>",
           },
           {
@@ -170,9 +175,14 @@ class RecordingController {
 
       // Parse all log entries
       const logEntries: LogEntry[] = [];
+      const seen = new Set<string>();
       for (const line of lines) {
         try {
           const entry = JSON.parse(line) as LogEntry;
+          if (seen.has(entry.recordingId)) {
+            continue;
+          }
+          seen.add(entry.recordingId);
           logEntries.push(entry);
         } catch (error) {
           console.warn("Failed to parse log entry:", line, error);
@@ -292,7 +302,7 @@ class Recording {
     });
     recording.$transcription.set({
       finished: true,
-      transcription: transcriptionText,
+      transcription: extractFinalTranscript(transcriptionText),
       error: null,
       audioLengthSeconds: logEntry.audioLengthSeconds,
       inputTokens: logEntry.inputTokens,
@@ -366,7 +376,7 @@ class Recording {
       const finalState = this.$transcription.get();
       this.$transcription.set({
         finished: true,
-        transcription,
+        transcription: extractFinalTranscript(transcription),
         error: null,
         latestThought: undefined,
         inputTokens: finalState?.inputTokens,
@@ -529,7 +539,11 @@ const StoppedRecordingDetail: React.FC<{ recording: Recording }> = ({ recording 
 const StoppedRecordingActions: React.FC<{ recording: Recording; onDelete: () => void }> = ({ recording, onDelete }) => {
   const transcription = useStore(recording.$transcription);
   const textToCopy = String(transcription?.transcription || "No transcription").trim();
-  const { default_action } = getPreferenceValues<{ gemini_api_key: string; default_action: string; gemini_model: string }>();
+  const { default_action } = getPreferenceValues<{
+    gemini_api_key: string;
+    default_action: string;
+    gemini_model: string;
+  }>();
 
   const isTypeFirst = default_action !== "copy";
   const decapitalizedText = textToCopy.charAt(0).toLowerCase() + textToCopy.slice(1);
@@ -601,3 +615,11 @@ function formatTime(timestamp: number): string {
     hour12: false,
   }).format(date);
 }
+
+const extractFinalTranscript = (fullText: string): string => {
+  const match = fullText.match(/<final_transcript>([\s\S]*?)<\/final_transcript>/);
+  if (match) {
+    return match[1].trim();
+  }
+  return fullText.trim();
+};
